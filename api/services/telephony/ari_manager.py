@@ -392,6 +392,21 @@ class ARIConnection:
                         transfer_id, channel_id, failure_message
                     )
                 )
+                return
+
+            # A call that is never answered dies here and nowhere else: no
+            # Stasis, no pipeline, no completion task. The hosted providers
+            # report that through their status callbacks, but ARI has none, so
+            # the run stayed open forever and the configured webhooks never
+            # fired -- the caller was left waiting for a result that could not
+            # arrive. Feed the same processor the other providers use.
+            status = self._map_hangup_cause_to_status(cause, tech_cause)
+            if status is not None:
+                asyncio.create_task(
+                    self._report_unconnected_call(
+                        channel_id, status, cause, cause_txt, tech_cause
+                    )
+                )
 
         elif event_type == "ChannelDtmfReceived":
             digit = event.get("digit", "")
@@ -857,6 +872,93 @@ class ARIConnection:
                     )
 
     # ======== CALL TRANSFER HELPER METHODS ========
+
+    def _map_hangup_cause_to_status(
+        self, cause: int, tech_cause: str
+    ) -> Optional["TelephonyCallStatus"]:
+        """Map an Asterisk hangup cause to a telephony status, or None.
+
+        None means "not our business": cause 16 is a normal clearing, which is
+        how an answered call ends, and those are already settled by the
+        pipeline. Only causes that mean the call never got through are mapped.
+        """
+        from api.enums import TelephonyCallStatus
+
+        if cause == 16:  # Normal clearing -- the call connected and ended
+            return None
+        if cause == 17:  # User busy
+            return TelephonyCallStatus.BUSY
+        if cause in (18, 19):  # No user responding / no answer
+            return TelephonyCallStatus.NO_ANSWER
+        if cause == 21 and tech_cause == "603":  # Decline
+            return TelephonyCallStatus.BUSY
+
+        return TelephonyCallStatus.FAILED
+
+    async def _report_unconnected_call(
+        self,
+        channel_id: str,
+        status: "TelephonyCallStatus",
+        cause: int,
+        cause_txt: str,
+        tech_cause: str,
+    ) -> None:
+        """Settle a run whose call never connected, and fire its webhooks.
+
+        Guarded on the run still being INITIALIZED: once the pipeline has run,
+        the call did connect and its own completion path owns the outcome, no
+        matter what cause the channel reports on the way out.
+        """
+        # Imported here: the status processor pulls in the campaign and task
+        # stack, and this module is loaded by a standalone ARI process.
+        from api.enums import WorkflowRunState
+        from api.services.telephony.status_processor import (
+            StatusCallbackRequest,
+            _process_status_update,
+        )
+
+        try:
+            workflow_run_id = await self._get_channel_run(channel_id)
+            if not workflow_run_id or await self._is_ext_channel(channel_id):
+                return
+
+            workflow_run = await db_client.get_workflow_run_by_id(
+                int(workflow_run_id)
+            )
+            if not workflow_run:
+                return
+            if (
+                workflow_run.is_completed
+                or workflow_run.state != WorkflowRunState.INITIALIZED.value
+            ):
+                return
+
+            logger.info(
+                f"[ARI org={self.organization_id}] Call never connected for "
+                f"workflow_run {workflow_run_id}: reporting {status.value} "
+                f"(cause={cause} {cause_txt}, tech_cause={tech_cause})"
+            )
+
+            await _process_status_update(
+                int(workflow_run_id),
+                StatusCallbackRequest(
+                    call_id=channel_id,
+                    status=status,
+                    extra={
+                        "source": "ari",
+                        "hangup_cause": cause,
+                        "hangup_cause_txt": cause_txt,
+                        "tech_cause": tech_cause,
+                    },
+                ),
+            )
+
+            await self._delete_channel_run(channel_id)
+        except Exception as e:
+            logger.error(
+                f"[ARI org={self.organization_id}] Error reporting unconnected "
+                f"call for channel {channel_id}: {e}"
+            )
 
     def _map_hangup_cause_to_message(
         self, cause: int, tech_cause: str, cause_txt: str
