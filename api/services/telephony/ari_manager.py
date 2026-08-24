@@ -27,17 +27,24 @@ from api.constants import REDIS_URL
 from api.db import db_client
 from api.enums import CallType, WorkflowRunMode
 from api.services.quota_service import authorize_workflow_run_start
+from api.services.telephony.ari_channel_registry import (
+    CHANNEL_KEY_PREFIX,
+    CHANNEL_KEY_TTL,
+    EXT_CHANNEL_KEY_PREFIX,
+    PENDING_BRIDGE_PREFIX,
+)
 from api.services.telephony.call_transfer_manager import get_call_transfer_manager
 from api.services.telephony.transfer_event_protocol import (
     TransferEvent,
     TransferEventType,
 )
 
-# Redis key pattern and TTL for channel-to-run mapping
-_CHANNEL_KEY_PREFIX = "ari:channel:"
-_EXT_CHANNEL_KEY_PREFIX = "ari:ext_channel:"
-_PENDING_BRIDGE_PREFIX = "ari:pending_bridge:"
-_CHANNEL_KEY_TTL = 3600  # 1 hour safety expiry
+# Redis key pattern and TTL for channel-to-run mapping. Shared with the API
+# process, which binds a channel the moment it originates the call.
+_CHANNEL_KEY_PREFIX = CHANNEL_KEY_PREFIX
+_EXT_CHANNEL_KEY_PREFIX = EXT_CHANNEL_KEY_PREFIX
+_PENDING_BRIDGE_PREFIX = PENDING_BRIDGE_PREFIX
+_CHANNEL_KEY_TTL = CHANNEL_KEY_TTL
 _PENDING_BRIDGE_TTL = 300  # 5 min safety expiry for bridge-pending state
 
 

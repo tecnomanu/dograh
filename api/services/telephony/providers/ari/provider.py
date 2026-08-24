@@ -15,6 +15,7 @@ from loguru import logger
 
 from api.db import db_client
 from api.enums import TelephonyCallStatus, WorkflowRunMode
+from api.services.telephony.ari_channel_registry import bind_channel_to_run
 from api.services.telephony.base import (
     CallInitiationResult,
     NormalizedInboundData,
@@ -138,6 +139,11 @@ class ARIProvider(TelephonyProvider):
                     f"[ARI] Channel created: {channel_id} "
                     f"state={response_data.get('state')}"
                 )
+
+                # Bind the channel to its run now, not when it reaches Stasis:
+                # a call nobody answers never gets that far, and the manager
+                # would have no way to tell whose run the dead channel was.
+                await bind_channel_to_run(channel_id, str(workflow_run_id))
 
                 return CallInitiationResult(
                     call_id=channel_id,
